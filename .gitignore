@@ -1,0 +1,17 @@
+# Carpetas de compilación (Basura de PyInstaller)
+__pycache__/
+build/
+dist/
+*.spec
+
+# Archivos locales de configuración y descargas
+config.txt
+*.mp4
+*.mp3
+*.zip
+
+# Binarios portables locales (Para que no pesen en tu GitHub)
+yt-dlp.exe
+ffmpeg.exe
+ffprobe.exe
+deno.exe
