@@ -5,9 +5,21 @@ import zipfile
 import io
 import time
 import json
+import sys
+
+# Evitar UnicodeEncodeError en Windows al imprimir caracteres especiales/box-drawing
+if sys.platform.startswith('win') and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
 
 # --- Ruta base del proyecto ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- Rutas de los ejecutables que el programa gestiona ---
 YTDLP_PATH = os.path.join(BASE_DIR, "yt-dlp.exe")
@@ -307,39 +319,78 @@ def actualizar_ffmpeg():
         return False
 
 def actualizar_deno():
-    # Ejecuta el proceso nativo de actualización de Deno.
+    # Ejecuta el proceso nativo de actualización de Deno o lo descarga si no está instalado.
     mostrar_encabezado("ACTUALIZAR DENO")
-
-    if not os.path.exists(DENO_PATH):
-        print("  [INFO] deno.exe no se localiza en este directorio. Saltando...")
-        return False
 
     if comprobar_bloqueo(DENO_PATH):
         print("  [ERROR] deno.exe está bloqueado.")
         return False
 
-    print("  >> Ejecutando proceso de actualización nativo de Deno...")
-    try:
-        resultado = subprocess.run(
-            [DENO_PATH, "upgrade"],
-            capture_output=True,
-            text=True,
-            timeout=20
-        )
-
-        if resultado.stdout:
-            print(resultado.stdout)
-        if resultado.stderr:
-            print(resultado.stderr)
-
-        if resultado.returncode != 0:
-            print(f"  [ERROR] La actualización de Deno terminó con código {resultado.returncode}.")
+    if not os.path.exists(DENO_PATH):
+        print("  [INFO] deno.exe no está instalado. Descargándolo desde GitHub...")
+        tiene_backup = gestionar_backup(DENO_PATH, crear=True)
+        url_deno = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
+        try:
+            req = urllib.request.Request(url_deno, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                total_size = int(response.info().get('Content-Length', 0))
+                bytes_descargados = 0
+                tiempo_inicio = time.time()
+                zip_en_memoria = io.BytesIO()
+                
+                while True:
+                    chunk = response.read(1024 * 64)
+                    if not chunk:
+                        break
+                    zip_en_memoria.write(chunk)
+                    bytes_descargados += len(chunk)
+                    mostrar_progreso(bytes_descargados, total_size, tiempo_inicio, "deno.zip")
+            
+            print("\n\n  >> Extrayendo deno.exe...")
+            zip_en_memoria.seek(0)
+            with zipfile.ZipFile(zip_en_memoria) as archivo_zip:
+                extraido = False
+                for ruta_interna in archivo_zip.namelist():
+                    if ruta_interna.endswith("deno.exe"):
+                        with archivo_zip.open(ruta_interna) as origen, open(DENO_PATH, "wb") as destino:
+                            destino.write(origen.read())
+                        extraido = True
+                        break
+            
+            if extraido and archivo_valido(DENO_PATH):
+                limpiar_backup(DENO_PATH)
+                print("\n  [OK] deno.exe instalado con éxito.")
+                return True
+            else:
+                raise Exception("El archivo extraído está vacío o incompleto.")
+        except Exception as e:
+            print(f"\n  [ERROR] Falló la descarga de Deno: {e}")
+            if tiene_backup:
+                gestionar_backup(DENO_PATH, crear=False)
             return False
+    else:
+        print("  >> Ejecutando proceso de actualización nativo de Deno...")
+        try:
+            resultado = subprocess.run(
+                [DENO_PATH, "upgrade"],
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
 
-        return True
-    except Exception as e:
-        print(f"  [ERROR] Falló Deno: {e}")
-        return False
+            if resultado.stdout:
+                print(resultado.stdout)
+            if resultado.stderr:
+                print(resultado.stderr)
+
+            if resultado.returncode != 0:
+                print(f"  [ERROR] La actualización de Deno terminó con código {resultado.returncode}.")
+                return False
+
+            return True
+        except Exception as e:
+            print(f"  [ERROR] Falló Deno: {e}")
+            return False
 
 # ==========================================
 # INTERFAZ DE USUARIO PRINCIPAL

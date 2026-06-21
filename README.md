@@ -24,7 +24,7 @@ Al ser una herramienta diseñada bajo el concepto de **Portabilidad Absoluta**, 
 1. Coloca el archivo `SMDM_downloader.exe` en la carpeta de tu preferencia (por ejemplo, en una memoria USB o en tu escritorio).
 2. Dale **doble clic** para ejecutarlo.
 3. Al iniciar por primera vez, el programa creará automáticamente un archivo local `config.txt` para recordar tu ruta de descargas preferida y un entorno portable limpio.
-4. Si el sistema te advierte que faltan componentes binarios, simplemente selecciona la **Opción [5] Actualizar / Reparar Componentes** para que el gestor monte el entorno en segundos de forma automática.
+4. Si el sistema te advierte que faltan componentes binarios, simplemente selecciona la **Opción [4] Actualizar / Reparar Componentes** para que el gestor monte el entorno en segundos de forma automática.
 
 > 💡 **Nota de Red:** No necesitas ejecutar este programa con privilegios de Administrador del sistema. Gracias a su enmascaramiento interno de red, el gestor obtendrá la máxima velocidad disponible en tu conexión por defecto.
 

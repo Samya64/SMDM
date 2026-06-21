@@ -1,6 +1,17 @@
 import os
 import subprocess
 import sys
+import time
+
+# Evitar UnicodeEncodeError en Windows al imprimir caracteres especiales/box-drawing
+if sys.platform.startswith('win') and hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+VERSION = "1.2.1"
 
 # Importamos el módulo local updater y sus variables de control visual
 try:
@@ -20,7 +31,10 @@ from video_menu import mostrar_menu_video
 CONFIG_FILE = "config.txt"
 
 # --- Ruta base del proyecto ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # --- Rutas necesarias para ejecutar yt-dlp y ffmpeg ---
 YTDLP_PATH = updater.YTDLP_PATH
@@ -36,7 +50,7 @@ def limpiar_pantalla():
 def mostrar_titulo(titulo):
     # Muestra solo el arte ASCII sin borde adicional para evitar problemas de visualización.
     ascii_lines = [
-        """
+        r"""
  ___ ___ __  __ ___ _    ___                        
 / __|_ _|  \/  | _ \ |  | __|                       
 \__ \| || |\/| |  _/ |__| _|                        
@@ -44,7 +58,6 @@ def mostrar_titulo(titulo):
 |  \/  | | | | ||_   _|_ _|  \/  | __|   \_ _| /_\  
 | |\/| | |_| | |__| |  | || |\/| | _|| |) | | / _ \ 
 |_|_ |_|\___/|____|_| |___|_| _|_|___|___/___/_/ \_\
-
 |   \ / _ \ \    / / \| | |  / _ \ /_\ |   \        
 | |) | (_) \ \/\/ /| .` | |_| (_) / _ \| |) |       
 |___/_\___/ \_/\_/ |_|\_|____\___/_/ \_\___/        
@@ -156,9 +169,9 @@ def obtener_estado_del_sistema():
 def obtener_alerta(status_yt, status_ff, status_dn):
     # Decide si mostrar una alerta simple en el menú principal.
     if "No instalado" in status_yt or "No instalado" in status_ff or "No instalado" in status_dn:
-        return f"{ROJO}  [Alerta]: Faltan componentes. Ejecuta la opción [5] para reparar.{RESET}"
+        return f"{ROJO}  [Alerta]: Faltan componentes. Ejecuta la opción [4] para reparar.{RESET}"
     elif "Disp." in status_yt or "Disp." in status_ff or "Disp." in status_dn:
-        return f"{AMARILLO}  [Info]: Hay actualizaciones disponibles. Revisa la opción [5].{RESET}"
+        return f"{AMARILLO}  [Info]: Hay actualizaciones disponibles. Revisa la opción [4].{RESET}"
     return ""
 
 
@@ -201,15 +214,19 @@ def encontrar_archivo_reciente(destino):
     archivo_mas_reciente = None
     tiempo_mas_reciente = None
 
-    for raiz, _, archivos in os.walk(destino):
-        for nombre in archivos:
-            ruta = os.path.join(raiz, nombre)
+    try:
+        for entrada in os.scandir(destino):
+            if not entrada.is_file():
+                continue
+            nombre = entrada.name
             if not nombre.lower().endswith(extensiones):
                 continue
-            tiempo = os.path.getmtime(ruta)
+            tiempo = entrada.stat().st_mtime
             if tiempo_mas_reciente is None or tiempo > tiempo_mas_reciente:
                 tiempo_mas_reciente = tiempo
-                archivo_mas_reciente = ruta
+                archivo_mas_reciente = entrada.path
+    except Exception:
+        pass
 
     return archivo_mas_reciente
 
@@ -227,6 +244,7 @@ def convertir_a_h264(archivo, ffmpeg_dir):
 
     comando = [
         ffmpeg_exe,
+        "-y",
         "-i",
         archivo,
         "-c:v",
@@ -258,6 +276,17 @@ def eliminar_si_existe(ruta):
 
 
 def main():
+    # Establecer título de la consola
+    if sys.platform.startswith('win'):
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetConsoleTitleW(f"SMDM {VERSION}")
+        except Exception:
+            pass
+    else:
+        sys.stdout.write(f"\033]0;SMDM {VERSION}\a")
+        sys.stdout.flush()
+
     destino = cargar_configuracion()
     
     limpiar_pantalla()
@@ -390,7 +419,7 @@ def main():
                     print("\n Carpeta actualizada.")
                 except Exception as e:
                     mostrar_error(str(e))
-                os.system("timeout /t 1 >nul" if os.name == "nt" else "sleep 1")
+                time.sleep(1)
 
         elif opcion == "4":
             # Ejecuta el actualizador externo y luego vuelve a cargar la ruta guardada.
@@ -399,7 +428,7 @@ def main():
 
         elif opcion == "5":
             print("\n ¡Hasta luego!")
-            os.system("timeout /t 1 >nul" if os.name == "nt" else "sleep 1")
+            time.sleep(1)
             break
 
 if __name__ == "__main__":

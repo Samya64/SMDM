@@ -1,35 +1,52 @@
 import os
 import subprocess
 import re
+import time
 
 
-def renombrar_archivos_con_espacios(destino, extensiones):
-    """Reemplaza '_' por espacios en nombres de archivos descargados."""
+def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
+    """Encuentra el archivo descargado más recientemente tras hora_inicio y reemplaza '_' por espacios."""
     if not os.path.isdir(destino):
         return
 
-    for entrada in os.scandir(destino):
-        if not entrada.is_file():
-            continue
+    archivo_mas_reciente = None
+    tiempo_mas_reciente = None
 
-        nombre_lower = entrada.name.lower()
-        if not any(nombre_lower.endswith(ext) for ext in extensiones):
-            continue
+    try:
+        for entrada in os.scandir(destino):
+            if not entrada.is_file():
+                continue
 
-        nombre_sanitizado = entrada.name.replace('_', ' ')
-        if nombre_sanitizado == entrada.name:
-            continue
+            nombre_lower = entrada.name.lower()
+            if not any(nombre_lower.endswith(ext) for ext in extensiones):
+                continue
 
-        ruta_original = entrada.path
-        ruta_nueva = os.path.join(destino, nombre_sanitizado)
+            stat = entrada.stat()
+            # Margen de 5 segundos para diferencias de reloj
+            if stat.st_mtime >= hora_inicio - 5:
+                if tiempo_mas_reciente is None or stat.st_mtime > tiempo_mas_reciente:
+                    tiempo_mas_reciente = stat.st_mtime
+                    archivo_mas_reciente = entrada
+    except Exception:
+        pass
 
-        contador = 1
-        while os.path.exists(ruta_nueva) and ruta_nueva != ruta_original:
-            base, ext = os.path.splitext(nombre_sanitizado)
-            ruta_nueva = os.path.join(destino, f"{base} ({contador}){ext}")
-            contador += 1
+    if archivo_mas_reciente:
+        nombre_original = archivo_mas_reciente.name
+        nombre_sanitizado = nombre_original.replace('_', ' ')
+        if nombre_sanitizado != nombre_original:
+            ruta_original = archivo_mas_reciente.path
+            ruta_nueva = os.path.join(destino, nombre_sanitizado)
 
-        os.rename(ruta_original, ruta_nueva)
+            contador = 1
+            while os.path.exists(ruta_nueva) and ruta_nueva != ruta_original:
+                base, ext = os.path.splitext(nombre_sanitizado)
+                ruta_nueva = os.path.join(destino, f"{base} ({contador}){ext}")
+                contador += 1
+
+            try:
+                os.rename(ruta_original, ruta_nueva)
+            except Exception:
+                pass
 
 
 def construir_comando_audio(destino, ytdlp_path, ffmpeg_dir, formato="mp3", calidad="192K"):
@@ -105,6 +122,7 @@ def descargar_audio(url, destino, ytdlp_path, ffmpeg_dir, formato="mp3", calidad
     comando = construir_comando_audio(destino, ytdlp_path, ffmpeg_dir, formato=formato, calidad=calidad)
     comando.append(url)
 
+    hora_inicio = time.time()
     try:
         proceso = subprocess.Popen(
             comando,
@@ -133,7 +151,8 @@ def descargar_audio(url, destino, ytdlp_path, ffmpeg_dir, formato="mp3", calidad
 
         renombrar_archivos_con_espacios(
             destino,
-            (".mp3", ".wav", ".ogg", ".m4a", ".aac", ".webm")
+            (".mp3", ".wav", ".ogg", ".m4a", ".aac", ".webm"),
+            hora_inicio
         )
         return True, ""
     except Exception as e:
