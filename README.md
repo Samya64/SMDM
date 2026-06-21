@@ -4,6 +4,10 @@ Un gestor ejecutable, ligero y portable para la descarga de video y audio optimi
 
 ---
 
+<img width="494" height="498" alt="image" src="https://github.com/user-attachments/assets/36e49992-898c-434f-b980-19c6f29f41ce" />
+
+
+
 ## ✨ Características Principales
 
 * **Formatos de Descarga Directos:**
