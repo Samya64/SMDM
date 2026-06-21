@@ -6,32 +6,50 @@ import io
 import time
 import json
 
-# Directorio base
+# --- Ruta base del proyecto ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Rutas globales de los ejecutables
+# --- Rutas de los ejecutables que el programa gestiona ---
 YTDLP_PATH = os.path.join(BASE_DIR, "yt-dlp.exe")
 DENO_PATH = os.path.join(BASE_DIR, "deno.exe")
 FFMPEG_PATH = os.path.join(BASE_DIR, "ffmpeg.exe")
 FFPROBE_PATH = os.path.join(BASE_DIR, "ffprobe.exe")
 
-# Códigos de color ANSI globales
+# --- Colores para mensajes en consola ---
 VERDE = "\033[92m"
 AMARILLO = "\033[93m"
 ROJO = "\033[91m"
 CYAN = "\033[96m"
 RESET = "\033[0m"
 
-# Diccionario global para almacenar el estado visual de cada binario
+# --- Estado visual del ecosistema (se actualiza según la comprobación) ---
 ESTADOS = {
     "ytdlp": f"{CYAN}[ Comprobando... ]{RESET}",
     "ffmpeg": f"{CYAN}[ Comprobando... ]{RESET}",
     "deno": f"{CYAN}[ Comprobando... ]{RESET}"
 }
 
+
 def limpiar_pantalla():
-    os.system("") # Inicializa el soporte ANSI en Windows nativamente
+    # Esto ayuda a que los colores ANSI funcionen correctamente en Windows.
+    os.system("")
     os.system("cls" if os.name == "nt" else "clear")
+
+
+def mostrar_encabezado(titulo):
+    # Se usa un ancho fijo para que el texto quede bien centrado dentro del recuadro.
+    ancho_texto = max(46, len(titulo) + 4)
+    borde = "═" * (ancho_texto + 2)
+
+    print(f"  ╔{borde}╗")
+    print(f"  ║ {titulo.center(ancho_texto)} ║")
+    print(f"  ╚{borde}╝\n")
+
+
+def archivo_valido(ruta):
+    # Evita aceptar archivos vacíos o incompletos tras una descarga.
+    return os.path.isfile(ruta) and os.path.getsize(ruta) > 0
+
 
 def mostrar_progreso(actual, total, tiempo_inicio, prefijo="Descargando"):
     tiempo_transcurrido = time.time() - tiempo_inicio
@@ -51,6 +69,7 @@ def mostrar_progreso(actual, total, tiempo_inicio, prefijo="Descargando"):
         print(f"\r  >> {prefijo}: Descargando... ({actual / (1024*1024):.1f} MB) ─ {VERDE}{txt_vel}{RESET}", end="", flush=True)
 
 def comprobar_bloqueo(ruta_archivo):
+    # Comprueba si el archivo está siendo usado por otro proceso.
     if os.path.exists(ruta_archivo):
         try:
             with open(ruta_archivo, "ab"):
@@ -58,6 +77,7 @@ def comprobar_bloqueo(ruta_archivo):
         except PermissionError:
             return True
     return False
+
 
 def gestionar_backup(ruta, crear=True):
     ruta_bak = ruta + ".bak"
@@ -76,20 +96,22 @@ def gestionar_backup(ruta, crear=True):
             pass
 
 def limpiar_backup(ruta):
+    # Limpia el respaldo si la descarga se completó correctamente.
     ruta_bak = ruta + ".bak"
     if os.path.exists(ruta_bak):
-        try: os.remove(ruta_bak)
-        except Exception: pass
+        try:
+            os.remove(ruta_bak)
+        except Exception:
+            pass
 
 # ==========================================
-# SECCIÓN DE EXTRACCIÓN DE VERSIONES
+# SECCIÓN DE COMPROBACIÓN DE VERSIONES
 # ==========================================
 
 def comprobar_estado_ytdlp():
     if not os.path.exists(YTDLP_PATH):
         return f"{ROJO}[ No instalado ]{RESET}"
     
-    # Obtener versión local
     v_local = None
     try:
         res = subprocess.run([YTDLP_PATH, "--version"], capture_output=True, text=True, timeout=3)
@@ -97,7 +119,6 @@ def comprobar_estado_ytdlp():
     except Exception:
         pass
 
-    # Obtener versión remota
     v_remota = None
     try:
         req = urllib.request.Request("https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest", headers={'User-Agent': 'Mozilla/5.0'})
@@ -142,12 +163,15 @@ def comprobar_estado_ffmpeg():
 def comprobar_estado_deno():
     if not os.path.exists(DENO_PATH):
         return f"{ROJO}[ No instalado ]{RESET}"
-        
+
     v_local = None
     try:
         res = subprocess.run([DENO_PATH, "--version"], capture_output=True, text=True, timeout=3)
         lineas = res.stdout.splitlines()
-        if lineas: v_local = lineas[0].split()[1].lstrip('v')
+        if lineas:
+            partes = lineas[0].split()
+            if len(partes) >= 2 and partes[0].lower() == "deno":
+                v_local = partes[1].lstrip('v')
     except Exception:
         pass
 
@@ -166,21 +190,19 @@ def comprobar_estado_deno():
     return f"{AMARILLO}[ Requiere Verificar ]{RESET}"
 
 def verificar_todo_el_ecosistema():
-    """Ejecuta los tres chequeos rápidos antes de pintar el menú."""
+    # Revisa todos los componentes una vez antes de mostrar el menú.
     global ESTADOS
     ESTADOS["ytdlp"] = comprobar_estado_ytdlp()
     ESTADOS["ffmpeg"] = comprobar_estado_ffmpeg()
     ESTADOS["deno"] = comprobar_estado_deno()
 
 # ==========================================
-# PROCESAMIENTO DE DESCARGAS
+# PROCESAMIENTO DE DESCARGAS Y ACTUALIZACIONES
 # ==========================================
 
 def actualizar_ytdlp():
-    print("  ╔══════════════════════════════════════════════════╗")
-    print("  ║               ACTUALIZAR YT-DLP                  ║")
-    print("  ╚══════════════════════════════════════════════════╝\n")
-    
+    mostrar_encabezado("ACTUALIZAR YT-DLP")
+
     if comprobar_bloqueo(YTDLP_PATH):
         print("  [ERROR] yt-dlp.exe está bloqueado. Cierra el gestor de descargas.")
         return False
@@ -202,11 +224,15 @@ def actualizar_ytdlp():
             with open(YTDLP_PATH, "wb") as f:
                 while True:
                     chunk = response.read(1024 * 64)
-                    if not chunk: break
+                    if not chunk:
+                        break
                     f.write(chunk)
                     bytes_descargados += len(chunk)
                     mostrar_progreso(bytes_descargados, total_size, tiempo_inicio, "yt-dlp.exe")
-            
+
+            if not archivo_valido(YTDLP_PATH):
+                raise Exception("el archivo descargado está vacío o incompleto")
+
             limpiar_backup(YTDLP_PATH)
             print("\n\n  [OK] yt-dlp.exe actualizado con éxito.")
             return True
@@ -216,10 +242,9 @@ def actualizar_ytdlp():
         return False
 
 def actualizar_ffmpeg():
-    print("  ╔══════════════════════════════════════════════════╗")
-    print("  ║          ACTUALIZAR FFMPEG Y FFPROBE             ║")
-    print("  ╚══════════════════════════════════════════════════╝\n")
-    
+    # Descarga el paquete oficial de FFmpeg y sustituye ambos binarios.
+    mostrar_encabezado("ACTUALIZAR FFMPEG Y FFPROBE")
+
     for ruta in [FFMPEG_PATH, FFPROBE_PATH]:
         if comprobar_bloqueo(ruta):
             print(f"  [ERROR] El archivo '{os.path.basename(ruta)}' está bloqueado.")
@@ -267,7 +292,7 @@ def actualizar_ffmpeg():
                     print(f"  [OK] Reemplazado: {nombre_binario}")
                     extraidos += 1
             
-            if extraidos == 2:
+            if extraidos == 2 and archivo_valido(FFMPEG_PATH) and archivo_valido(FFPROBE_PATH):
                 limpiar_backup(FFMPEG_PATH)
                 limpiar_backup(FFPROBE_PATH)
                 print("\n  ¡FFmpeg y FFprobe actualizados correctamente!")
@@ -282,34 +307,47 @@ def actualizar_ffmpeg():
         return False
 
 def actualizar_deno():
-    print("  ╔══════════════════════════════════════════════════╗")
-    print("  ║                 ACTUALIZAR DENO                  ║")
-    print("  ╚══════════════════════════════════════════════════╝\n")
-    
-    if os.path.exists(DENO_PATH):
-        if comprobar_bloqueo(DENO_PATH):
-            print("  [ERROR] deno.exe está bloqueado.")
-            return False
-            
-        print("  >> Ejecutando proceso de actualización nativo de Deno...")
-        try:
-            resultado = subprocess.run([DENO_PATH, "upgrade"], capture_output=True, text=True, timeout=20)
-            print(resultado.stdout)
-            if resultado.stderr: print(resultado.stderr)
-            return True
-        except Exception as e:
-            print(f"  [ERROR] Falló Deno: {e}")
-            return False
-    else:
+    # Ejecuta el proceso nativo de actualización de Deno.
+    mostrar_encabezado("ACTUALIZAR DENO")
+
+    if not os.path.exists(DENO_PATH):
         print("  [INFO] deno.exe no se localiza en este directorio. Saltando...")
+        return False
+
+    if comprobar_bloqueo(DENO_PATH):
+        print("  [ERROR] deno.exe está bloqueado.")
+        return False
+
+    print("  >> Ejecutando proceso de actualización nativo de Deno...")
+    try:
+        resultado = subprocess.run(
+            [DENO_PATH, "upgrade"],
+            capture_output=True,
+            text=True,
+            timeout=20
+        )
+
+        if resultado.stdout:
+            print(resultado.stdout)
+        if resultado.stderr:
+            print(resultado.stderr)
+
+        if resultado.returncode != 0:
+            print(f"  [ERROR] La actualización de Deno terminó con código {resultado.returncode}.")
+            return False
+
+        return True
+    except Exception as e:
+        print(f"  [ERROR] Falló Deno: {e}")
         return False
 
 # ==========================================
 # INTERFAZ DE USUARIO PRINCIPAL
 # ==========================================
 
-def menu_principal():
-    # El primer escaneo real ocurre justo aquí
+def arrancar_actualizador():
+    # Este es el menú principal del actualizador.
+    """Función unificada que controla el menú de actualización."""
     limpiar_pantalla()
     print("\n  Conectando con servidores remotos...")
     verificar_todo_el_ecosistema()
@@ -328,52 +366,6 @@ def menu_principal():
         print("  " + "─"*62)
         
         opcion = input("  Selecciona una opción (1-6): ").strip()
-        
-        if opcion == "1":
-            limpiar_pantalla()
-            if actualizar_ytdlp():
-                ESTADOS["ytdlp"] = comprobar_estado_ytdlp() # Actualiza su estado en caliente
-            input("\n  Presiona Enter para volver...")
-        elif opcion == "2":
-            limpiar_pantalla()
-            if actualizar_ffmpeg():
-                ESTADOS["ffmpeg"] = comprobar_estado_ffmpeg()
-            input("\n  Presiona Enter para volver...")
-        elif opcion == "3":
-            limpiar_pantalla()
-            if actualizar_deno():
-                ESTADOS["deno"] = comprobar_estado_deno()
-            input("\n  Presiona Enter para volver...")
-        elif opcion == "4":
-            limpiar_pantalla()
-            print("  === INICIANDO OPERACIÓN COMPLETA ===\n")
-            actualizar_ytdlp()
-            print("\n" + "─"*53 + "\n")
-            actualizar_ffmpeg()
-            print("\n" + "─"*53 + "\n")
-            actualizar_deno()
-            print("\n  >> Re-evaluando entorno post-descargas...")
-            verificar_todo_el_ecosistema()
-            print("\n  === ENTORNO SINCRONIZADO ===")
-            input("\n  Presiona Enter para volver...")
-        elif opcion == "5":
-            limpiar_pantalla()
-            print("\n  Re-evaluando las respuestas de las APIs públicas...")
-            verificar_todo_el_ecosistema()
-        elif opcion == "6":
-            print("\n  Saliendo. ¡Que tengas un excelente día de producción!")
-            time.sleep(1)
-            break
-        else:
-            print("\n  [ALERTA] Opción incorrecta.")
-            time.sleep(1.2)
-
-def arrancar_actualizador():
-    """Función contenedora del bucle del menú de actualización."""
-    verificar_todo_el_ecosistema()
-    while True:
-        mostrar_menu_principal()
-        opcion = input("  Elige una opción [1-6]: ").strip()
         
         if opcion == "1":
             limpiar_pantalla()
@@ -411,9 +403,8 @@ def arrancar_actualizador():
             time.sleep(0.5)
             break
         else:
-            print(f"\n  {ROJO}Opción no válida.{RESET}")
-            time.sleep(1)
+            print(f"\n  {ROJO}[ALERTA] Opción incorrecta.{RESET}")
+            time.sleep(1.2)
 
 if __name__ == "__main__":
-    # Si se ejecuta este script directamente, arranca el menú
     arrancar_actualizador()

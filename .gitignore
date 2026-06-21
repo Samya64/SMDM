@@ -1,17 +1,27 @@
-# Carpetas de compilación (Basura de PyInstaller)
+# Carpetas de compilación y artefactos Python
 __pycache__/
 build/
 dist/
 *.spec
+*.py[cod]
+*.pyo
+
+# Entornos virtuales y editor
+.venv/
+.vscode/
 
 # Archivos locales de configuración y descargas
 config.txt
 *.mp4
 *.mp3
+*.wav
+*.ogg
 *.zip
+*.log
 
 # Binarios portables locales (Para que no pesen en tu GitHub)
 yt-dlp.exe
 ffmpeg.exe
 ffprobe.exe
 deno.exe
+SMDM.code-workspace
