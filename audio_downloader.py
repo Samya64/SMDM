@@ -50,27 +50,41 @@ def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
 
 
 def construir_comando_audio(destino, ytdlp_path, ffmpeg_dir, formato="mp3", calidad="192K"):
-    """Construye el comando de yt-dlp para la descarga de audio."""
+    """Construye el comando de yt-dlp para la descarga y conversión de audio."""
+    
+    # Aplicamos tu genial estrategia aquí:
+    # 1. Agregamos --windows-filenames para limpiar caracteres ilegales.
+    # 2. Usamos %(title).100s para recortar estrictamente a 100 caracteres.
+    plantilla_salida = os.path.join(destino, "%(title).100s.%(ext)s")
+
     comando = [
         ytdlp_path,
         "--ffmpeg-location",
         ffmpeg_dir,
         "--no-playlist",
         "--no-part",
-        "--format",
-        "bestaudio/best",
-        "--extract-audio",
-        "--audio-format",
-        formato,
-        "--output",
-        os.path.join(destino, "%(title)s.%(ext)s")
+        "--windows-filenames",        # Asegura compatibilidad de caracteres en Windows
+        "--output", plantilla_salida   # Aplica la plantilla de recorte de 100 caracteres
     ]
 
-    if calidad and formato == "mp3":
-        comando.extend(["--audio-quality", calidad])
+    if formato == "mp3":
+        comando.extend([
+            "--extract-audio",
+            "--audio-format", "mp3",
+            "--audio-quality", calidad if calidad else "192K"
+        ])
+    elif formato in ["wav", "ogg", "m4a"]:
+        comando.extend([
+            "--extract-audio",
+            "--audio-format", formato
+        ])
+    else:
+        # Formato no soportado explícitamente, descargamos el mejor audio disponible
+        comando.extend([
+            "--format", "bestaudio/best"
+        ])
 
     return comando
-
 
 def extraer_progreso(linea):
     """Intenta extraer porcentaje, velocidad y ETA desde la salida de yt-dlp."""

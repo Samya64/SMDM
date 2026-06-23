@@ -51,36 +51,22 @@ def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
 
 def construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo="compat"):
     """Construye el comando de yt-dlp para la descarga de video."""
+    
+    # Eliminamos "--restrict-filenames" para que use espacios naturales
     comando = [
         ytdlp_path,
         "--ffmpeg-location",
         ffmpeg_dir,
         "--no-playlist",
-        "--no-part"
+        "--no-part",
+        "--windows-filenames"  # Mantiene los espacios, pero limpia caracteres prohibidos de Windows
     ]
 
-    # 1080p sigue siendo la opción por defecto y se prioriza el formato compatible.
     opciones = {
-        "1": {
-            "altura": 1080,
-            "etiqueta": "1080p",
-            "formato_compat": "bestvideo[height<=1080][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=1080][vcodec^=avc]"
-        },
-        "2": {
-            "altura": 720,
-            "etiqueta": "720p",
-            "formato_compat": "bestvideo[height<=720][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=720][vcodec^=avc]"
-        },
-        "3": {
-            "altura": 480,
-            "etiqueta": "480p",
-            "formato_compat": "bestvideo[height<=480][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=480][vcodec^=avc]"
-        },
-        "4": {
-            "altura": 360,
-            "etiqueta": "360p",
-            "formato_compat": "bestvideo[height<=360][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=360][vcodec^=avc]"
-        }
+        "1": {"altura": 1080, "etiqueta": "1080p", "formato_compat": "bestvideo[height<=1080][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=1080][vcodec^=avc]"},
+        "2": {"altura": 720,  "etiqueta": "720p",  "formato_compat": "bestvideo[height<=720][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=720][vcodec^=avc]"},
+        "3": {"altura": 480,  "etiqueta": "480p",  "formato_compat": "bestvideo[height<=480][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=480][vcodec^=avc]"},
+        "4": {"altura": 360,  "etiqueta": "360p",  "formato_compat": "bestvideo[height<=360][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=360][vcodec^=avc]"}
     }
 
     if opcion not in opciones:
@@ -89,21 +75,37 @@ def construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo="compa
     config = opciones[opcion]
     base = config["formato_compat"]
 
+    # Generamos la plantilla dinámica. Al no tener restricciones rígidas de nombres, 
+    # yt-dlp escribirá los espacios tal cual vengan en el título original.
+    plantilla_salida = os.path.join(destino, f"%(title).100s_[{config['etiqueta']}].%(ext)s")
+    
+    comando.extend(["--output", plantilla_salida])
+
     if modo == "convertir":
         formato = f"bestvideo[height<={config['altura']}]+bestaudio/best"
         comando.extend([
-            "--format",
-            formato,
-            "--merge-output-format",
-            "mp4",
-            "--recode-video",
-            "mp4",
-            "--recode-audio",
-            "aac",
-            "--output",
-            os.path.join(destino, f"%(title)s_[{config['etiqueta']}].%(ext)s")
+            "--format", formato,
+            "--merge-output-format", "mp4",
+            "--recode-video", "mp4",
+            "--recode-audio", "aac"
         ])
         return comando
+
+    if modo == "nativo":
+        formato = f"bestvideo[height<={config['altura']}]+bestaudio/best"
+        comando.extend([
+            "--format", formato
+        ])
+        return comando
+
+    # Modo por defecto (compat)
+    comando.extend([
+        "--format", base,
+        "--merge-output-format", "mp4",
+        "--embed-chapters"
+    ])
+
+    return comando
 
     if modo == "nativo":
         formato = f"bestvideo[height<={config['altura']}]+bestaudio/best"
@@ -111,7 +113,7 @@ def construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo="compa
             "--format",
             formato,
             "--output",
-            os.path.join(destino, f"%(title)s_[{config['etiqueta']}].%(ext)s")
+            os.path.join(destino, f"%(title).100s_[{config['etiqueta']}].%(ext)s")
         ])
         return comando
 
@@ -123,7 +125,7 @@ def construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo="compa
         "mp4",
         "--embed-chapters",
         "--output",
-        os.path.join(destino, f"%(title)s_[{config['etiqueta']}].%(ext)s")
+        os.path.join(destino, f"%(title).100s_[{config['etiqueta']}].%(ext)s")
     ])
 
     return comando
