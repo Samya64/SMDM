@@ -11,7 +11,7 @@ if sys.platform.startswith('win') and hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 
 # Importamos el módulo local updater y sus variables de control visual
 try:
