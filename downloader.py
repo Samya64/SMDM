@@ -1,7 +1,9 @@
 import os
 import subprocess
 import sys
+import re
 import time
+
 
 # Evitar UnicodeEncodeError en Windows al imprimir caracteres especiales/box-drawing
 if sys.platform.startswith('win') and hasattr(sys.stdout, 'reconfigure'):
@@ -11,7 +13,7 @@ if sys.platform.startswith('win') and hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 
 # Importamos el módulo local updater y sus variables de control visual
 try:
@@ -24,7 +26,7 @@ except ImportError:
 
 from audio_downloader import descargar_audio
 from audio_menu import mostrar_menu_audio, obtener_formato_audio
-from video_downloader import descargar_video
+from video_downloader import descargar_video, verificar_codec_rapido
 from video_menu import mostrar_menu_video
 
 # --- Archivo donde se guarda la carpeta elegida por el usuario ---
@@ -137,12 +139,12 @@ def verificar_archivos(destino):
     print("\n  Archivos disponibles en la carpeta de descarga:")
     print("  ─────────────────────────────────────────────────────")
     if os.path.isdir(destino):
-        archivos = [f for f in os.listdir(destino) if f.endswith(('.mp4', '.mp3'))]
+        archivos = [f for f in os.listdir(destino) if f.endswith((".mp4", ".mkv", ".webm", ".avi", ".mov", ".m4a", ".mp3", ".wav", ".ogg"))]
         if archivos:
             for archivo in archivos:
                 print(f"  {archivo}")
         else:
-            print("  (No se encontraron archivos .mp4 o .mp3)")
+            print("  (No se encontraron archivos multimedia)")
     else:
         print("  (La carpeta de descarga no existe o no se puede leer)")
     print("  ─────────────────────────────────────────────────────")
@@ -242,30 +244,42 @@ def convertir_a_h264(archivo, ffmpeg_dir):
     base, ext = os.path.splitext(archivo)
     salida = base + "_h264.mp4"
 
+    # Comando con flag de progreso
     comando = [
-        ffmpeg_exe,
-        "-y",
-        "-i",
-        archivo,
-        "-c:v",
-        "libx264",
-        "-c:a",
-        "aac",
-        "-movflags",
-        "+faststart",
-        salida
+        ffmpeg_exe, "-y", "-i", archivo,
+        "-c:v", "libx264", "-c:a", "aac",
+        "-movflags", "+faststart", salida
     ]
 
-    print(f"\n  Convirtiendo a H.264/AAC: {os.path.basename(archivo)}\n")
+    print(f"\n  {CYAN}Iniciando conversión a H.264...{RESET}")
+    
     try:
-        proceso = subprocess.run(comando, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
-        if proceso.returncode != 0:
-            salida_error = proceso.stdout.strip()
-            return False, salida_error if salida_error else "La conversión falló."
-        return True, salida
+        # Ejecutamos ffmpeg capturando stderr (donde ffmpeg envía su progreso)
+        proceso = subprocess.Popen(
+            comando, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace"
+        )
+
+        # Aquí leeremos el stderr línea a línea para mostrar el progreso
+        while True:
+            linea = proceso.stderr.readline()
+            if not linea and proceso.poll() is not None:
+                break
+            
+            # Buscamos el tiempo transcurrido en la salida de ffmpeg
+            match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", linea)
+            if match:
+                tiempo_actual = match.group(1)
+                print(f"\r  {CYAN}Progreso de conversión:{RESET} {tiempo_actual} transcurridos...", end="", flush=True)
+
+        if proceso.returncode == 0:
+            print(f"\n  {VERDE}¡Conversión completada con éxito!{RESET}")
+            return True, salida
+        else:
+            return False, "La conversión falló durante el proceso de FFmpeg."
+            
     except Exception as e:
         return False, str(e)
-
 
 def eliminar_si_existe(ruta):
     try:
@@ -326,10 +340,40 @@ def main():
                 if not url:
                     continue
 
-                print("\n  Descargando video...\n")
-                ok, mensaje = descargar_video(url, opcion_video, destino, YTDLP_PATH, FFMPEG_DIR)
+                # 1. Definimos los límites para la inspección según la opción elegida
+                limites = {"1": "1080", "2": "720", "3": "480", "4": "360"}
+                limite_res = limites.get(opcion_video, "1080")
+                
+                # 2. Inspeccionamos el codec antes de descargar nada
+                print("\n   Verificando compatibilidad...")
+                codec_detectado = verificar_codec_rapido(url, limite_res, YTDLP_PATH)
+                modo_elegido = "compat"
+
+                # 3. Lógica de decisión si detectamos un codec moderno (no avc/h.264)
+                if codec_detectado and "avc" not in codec_detectado and codec_detectado != "desconocido":
+                    nombre_codec = "AV1" if "av01" in codec_detectado else ("VP9" if "vp09" in codec_detectado else codec_detectado)
+                    
+                    print(f"\n  {AMARILLO} ATENCIÓN: El codec original es '{nombre_codec}'.{RESET}")
+                    print("  ¿Qué deseas hacer?")
+                    print("  [1] Convertir a H.264 (Recomendado - Máxima compatibilidad)")
+                    print("  [2] Mantener el formato original (Más rápido)")
+                    
+                    while True:
+                        resp = input("\n  Elige una opción [1 o 2]: ").strip()
+                        if resp == "1":
+                            modo_elegido = "convertir"
+                            break
+                        elif resp == "2":
+                            modo_elegido = "nativo"
+                            break
+                        print("  Opción inválida.")
+
+                # 4. Lanzamos la descarga
+                print(f"\n  Descargando en modo: {modo_elegido}...\n")
+                ok, mensaje = descargar_video(url, opcion_video, destino, YTDLP_PATH, FFMPEG_DIR, modo=modo_elegido)
+                
                 if ok:
-                    print("\n  ¡Finalizado!")
+                    print("\n  ¡Finalizado con éxito!")
                 else:
                     if detectar_error_codec(mensaje):
                         mostrar_error("El codec predeterminado (H.264/AAC) no está disponible para esta URL.")

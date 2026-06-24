@@ -4,6 +4,24 @@ import re
 import time
 
 
+def verificar_codec_rapido(url, limite_res, ytdlp_path):
+    """Consulta rápidamente el codec de video que yt-dlp seleccionó como el mejor."""
+    print("  Inspeccionando la metadata del video en el servidor...")
+    comando = [
+        ytdlp_path,
+        "--no-playlist",
+        "--format-sort", f"res:{limite_res}",
+        "--print", "vcodec",
+        url
+    ]
+    try:
+        resultado = subprocess.run(comando, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
+        codec = resultado.stdout.strip().lower()
+        return codec
+    except subprocess.CalledProcessError:
+        return "desconocido"
+
+
 def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
     """Encuentra el archivo descargado más recientemente tras hora_inicio y reemplaza '_' por espacios."""
     if not os.path.isdir(destino):
@@ -52,80 +70,58 @@ def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
 def construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo="compat"):
     """Construye el comando de yt-dlp para la descarga de video."""
     
-    # Eliminamos "--restrict-filenames" para que use espacios naturales
     comando = [
         ytdlp_path,
         "--ffmpeg-location",
         ffmpeg_dir,
         "--no-playlist",
         "--no-part",
-        "--windows-filenames"  # Mantiene los espacios, pero limpia caracteres prohibidos de Windows
+        "--windows-filenames"
     ]
 
     opciones = {
-        "1": {"altura": 1080, "etiqueta": "1080p", "formato_compat": "bestvideo[height<=1080][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=1080][vcodec^=avc]"},
-        "2": {"altura": 720,  "etiqueta": "720p",  "formato_compat": "bestvideo[height<=720][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=720][vcodec^=avc]"},
-        "3": {"altura": 480,  "etiqueta": "480p",  "formato_compat": "bestvideo[height<=480][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=480][vcodec^=avc]"},
-        "4": {"altura": 360,  "etiqueta": "360p",  "formato_compat": "bestvideo[height<=360][vcodec^=avc]+bestaudio[ext=m4a]/best[height<=360][vcodec^=avc]"}
+        "1": {"limite": "1080", "etiqueta": "1080p"},
+        "2": {"limite": "720",  "etiqueta": "720p"},
+        "3": {"limite": "480",  "etiqueta": "480p"},
+        "4": {"limite": "360",  "etiqueta": "360p"}
     }
 
     if opcion not in opciones:
         raise ValueError("Opción de video no válida")
 
     config = opciones[opcion]
-    base = config["formato_compat"]
-
-    # Generamos la plantilla dinámica. Al no tener restricciones rígidas de nombres, 
-    # yt-dlp escribirá los espacios tal cual vengan en el título original.
-    plantilla_salida = os.path.join(destino, f"%(title).100s_[{config['etiqueta']}].%(ext)s")
     
+    # Aplicamos la plantilla del nombre seguro (máximo 100 caracteres)
+    plantilla_salida = os.path.join(destino, f"%(title).100s_[{config['etiqueta']}].%(ext)s")
     comando.extend(["--output", plantilla_salida])
 
+    # Ordenar los formatos con un límite máximo de resolución (horizontal o vertical)
+    comando.extend(["--format-sort", f"res:{config['limite']}"])
+
+    # Formatos limpios y universales
     if modo == "convertir":
-        formato = f"bestvideo[height<={config['altura']}]+bestaudio/best"
         comando.extend([
-            "--format", formato,
+            "--format", "bestvideo+bestaudio/best",
             "--merge-output-format", "mp4",
+            # Añadimos --recode-video para forzar la conversión
             "--recode-video", "mp4",
-            "--recode-audio", "aac"
+            # Aquí está el truco: usamos -movflags +faststart para que sea "streamable"
+            # y los argumentos de ffmpeg para asegurar el codec H.264
+            "--postprocessor-args", "ffmpeg:-c:v libx264 -c:a aac -movflags +faststart"
         ])
         return comando
 
     if modo == "nativo":
-        formato = f"bestvideo[height<={config['altura']}]+bestaudio/best"
         comando.extend([
-            "--format", formato
+            "--format", "bestvideo+bestaudio/best"
         ])
         return comando
 
-    # Modo por defecto (compat)
+    # Modo por defecto (compat): Intentamos buscar H.264/m4a, y si no, caemos al mejor disponible
     comando.extend([
-        "--format", base,
+        "--format", "bestvideo[vcodec^=avc]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
         "--merge-output-format", "mp4",
         "--embed-chapters"
-    ])
-
-    return comando
-
-    if modo == "nativo":
-        formato = f"bestvideo[height<={config['altura']}]+bestaudio/best"
-        comando.extend([
-            "--format",
-            formato,
-            "--output",
-            os.path.join(destino, f"%(title).100s_[{config['etiqueta']}].%(ext)s")
-        ])
-        return comando
-
-    # Modo por defecto: priorizar explícitamente el codec H.264/AAC para evitar AV1 en la descarga inicial.
-    comando.extend([
-        "--format",
-        base,
-        "--merge-output-format",
-        "mp4",
-        "--embed-chapters",
-        "--output",
-        os.path.join(destino, f"%(title).100s_[{config['etiqueta']}].%(ext)s")
     ])
 
     return comando
@@ -145,13 +141,10 @@ def extraer_progreso(linea):
     if match:
         velocidad = match.group(1)
 
-    # Regex más estricta para evitar mezclar minutos con segundos.
-    # Busca primero formatos tipo 01:23 o 01:23:45.
     match = re.search(r'ETA\s*([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)', linea, re.IGNORECASE)
     if match:
         eta = match.group(1)
     else:
-        # Luego acepta formatos tipo 1m 23s o 1 min 23 sec.
         match = re.search(r'ETA\s*([0-9]+\s*(?:m|min|mins|minute|minutes)\s*[0-9]+\s*(?:s|sec|secs|second|seconds)?)', linea, re.IGNORECASE)
         if match:
             eta = match.group(1)
@@ -162,8 +155,6 @@ def extraer_progreso(linea):
 def mostrar_barra_progreso(linea):
     porcentaje, velocidad, eta = extraer_progreso(linea)
     if porcentaje is None:
-        # si no hay porcentaje claro, mostramos la línea tal como viene para que el usuario vea el progreso real.
-        print(f"  {linea}")
         return
 
     p = float(porcentaje)
@@ -174,11 +165,12 @@ def mostrar_barra_progreso(linea):
         info += f"  |  Vel: {velocidad}"
     if eta:
         info += f"  |  ETA: {eta}"
+    
+    # Se asegura de imprimir correctamente en la misma línea
     print(f"\r  [{barra}] {info}", end="", flush=True)
 
 
 def descargar_video(url, opcion, destino, ytdlp_path, ffmpeg_dir, modo="compat"):
-    """Ejecuta la descarga de video y devuelve True/False según el resultado."""
     comando = construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo=modo)
     comando.append(url)
 
@@ -194,16 +186,40 @@ def descargar_video(url, opcion, destino, ytdlp_path, ffmpeg_dir, modo="compat")
         )
 
         salida = []
+        # Bandera para saber si ya pasamos la fase de descarga
+        procesando_conversion = False
+
+        
         for linea in proceso.stdout:
-            if not linea:
-                continue
+            if not linea: continue
             linea = linea.strip()
-            if linea:
-                salida.append(linea)
+            if not linea: continue
+            
+            salida.append(linea)
+            
+            # Detectamos si entramos en fase de re-codificación
+            if "re-encoding" in linea or "Converting" in linea:
+                print(f"\n --- Descarga completada. Iniciando conversión a H.264... ---")
+            
+            # Solo mostramos barra si aún no hemos terminado la descarga
+            if "[download]" in linea:
+                mostrar_barra_progreso(linea)
+            
+            # Si detectamos que yt-dlp empieza a convertir/re-codificar
+            if "has already been downloaded" in linea or "Converting video" in linea or "re-encoding" in linea:
+                if not procesando_conversion:
+                    print(f"\n  --- Descarga completada. Iniciando conversión/re-codificación (puede tardar) ---")
+                    procesando_conversion = True
+            
+            # Solo mostramos barra si aún no estamos en fase de post-procesamiento
+            if not procesando_conversion:
                 mostrar_barra_progreso(linea)
 
         proceso.wait()
         print("\n")
+        
+        # ... resto de la función (return True/False)
+        
         if proceso.returncode != 0:
             ultimas = [linea for linea in salida[-12:] if linea]
             mensaje = "\n".join(ultimas) if ultimas else "La descarga terminó con un error."
