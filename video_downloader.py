@@ -5,9 +5,28 @@ import time
 
 
 def verificar_codec_rapido(url, limite_res, ytdlp_path):
-    """Consulta rápidamente el codec de video que yt-dlp seleccionó como el mejor."""
-    print("  Inspeccionando la metadata del video en el servidor...")
-    comando = [
+    """Verifica si existe H.264 nativo. Si no, devuelve el codec principal disponible."""
+    print("  🔍 Inspeccionando la metadata del video en el servidor...")
+    
+    # PASO 1: Buscar forzosamente si existe una versión en H.264 (avc)
+    comando_h264 = [
+        ytdlp_path,
+        "--no-playlist",
+        "--format-sort", f"res:{limite_res}",
+        "-f", "bestvideo[vcodec^=avc]",  # Filtramos solo H.264
+        "--print", "vcodec",
+        url
+    ]
+    try:
+        resultado = subprocess.run(comando_h264, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
+        codec = resultado.stdout.strip().lower()
+        if codec and "avc" in codec:
+            return True, codec  # True = Sí existe H.264
+    except subprocess.CalledProcessError:
+        pass  # No existe H.264, seguimos al paso 2
+
+    # PASO 2: Si no hay H.264, buscar cuál es el mejor codec disponible
+    comando_general = [
         ytdlp_path,
         "--no-playlist",
         "--format-sort", f"res:{limite_res}",
@@ -15,11 +34,11 @@ def verificar_codec_rapido(url, limite_res, ytdlp_path):
         url
     ]
     try:
-        resultado = subprocess.run(comando, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
+        resultado = subprocess.run(comando_general, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
         codec = resultado.stdout.strip().lower()
-        return codec
+        return False, codec  # False = No hay H.264, devolvemos el extraño
     except subprocess.CalledProcessError:
-        return "desconocido"
+        return False, "desconocido"
 
 
 def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
@@ -74,9 +93,10 @@ def construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo="compa
         ytdlp_path,
         "--ffmpeg-location",
         ffmpeg_dir,
-        "--no-playlist",
-        "--no-part",
-        "--windows-filenames"
+        "--no-playlist", 
+        "--no-part", 
+        "--windows-filenames", 
+        "--no-mtime" 
     ]
 
     opciones = {

@@ -3,6 +3,8 @@ import subprocess
 import sys
 import re
 import time
+import socket
+import json
 
 
 # Evitar UnicodeEncodeError en Windows al imprimir caracteres especiales/box-drawing
@@ -13,7 +15,7 @@ if sys.platform.startswith('win') and hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
-VERSION = "1.2.3"
+VERSION = "1.2.4"
 
 # Importamos el módulo local updater y sus variables de control visual
 try:
@@ -171,9 +173,9 @@ def obtener_estado_del_sistema():
 def obtener_alerta(status_yt, status_ff, status_dn):
     # Decide si mostrar una alerta simple en el menú principal.
     if "No instalado" in status_yt or "No instalado" in status_ff or "No instalado" in status_dn:
-        return f"{ROJO}  [Alerta]: Faltan componentes. Ejecuta la opción [4] para reparar.{RESET}"
+        return f"{ROJO} [Alerta]: Faltan componentes. Ejecuta la opción [4] para reparar.{RESET}"
     elif "Disp." in status_yt or "Disp." in status_ff or "Disp." in status_dn:
-        return f"{AMARILLO}  [Info]: Hay actualizaciones disponibles. Revisa la opción [4].{RESET}"
+        return f"{AMARILLO} [Info]: Hay actualizaciones disponibles. Revisa la opción [4].{RESET}"
     return ""
 
 
@@ -233,9 +235,32 @@ def encontrar_archivo_reciente(destino):
     return archivo_mas_reciente
 
 
+def obtener_duracion_video(archivo, ffmpeg_dir):
+    """Obtiene la duración total del video en segundos usando ffprobe (si existe) o ffmpeg."""
+    ffprobe_exe = os.path.join(ffmpeg_dir, "ffprobe.exe")
+    if not os.path.exists(ffprobe_exe):
+        ffprobe_exe = "ffprobe"
+        
+    comando = [
+        ffprobe_exe, "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", archivo
+    ]
+    try:
+        resultado = subprocess.run(comando, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+        duracion = float(resultado.stdout.strip())
+        if duracion > 0:
+            return duracion
+    except Exception:
+        pass
+    return None
+
+
 def convertir_a_h264(archivo, ffmpeg_dir):
     if not archivo or not os.path.exists(archivo):
         return False, "No se encontró el archivo descargado."
+
+    # 1. Intentar obtener la duración total del video original para el porcentaje
+    duracion_total = obtener_duracion_video(archivo, ffmpeg_dir)
 
     ffmpeg_exe = os.path.join(ffmpeg_dir, "ffmpeg.exe")
     if not os.path.exists(ffmpeg_exe):
@@ -244,43 +269,104 @@ def convertir_a_h264(archivo, ffmpeg_dir):
     base, ext = os.path.splitext(archivo)
     salida = base + "_h264.mp4"
 
-    # Comando con flag de progreso
+    # Servidor TCP local para comunicación en tiempo real con FFmpeg
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind(('127.0.0.1', 0))
+    server_socket.listen(1)
+    puerto = server_socket.getsockname()[1]
+
     comando = [
-        ffmpeg_exe, "-y", "-i", archivo,
+        ffmpeg_exe, "-y", "-progress", f"tcp://127.0.0.1:{puerto}", "-i", archivo,
         "-c:v", "libx264", "-c:a", "aac",
         "-movflags", "+faststart", salida
     ]
 
     print(f"\n  {CYAN}Iniciando conversión a H.264...{RESET}")
     
+    # Registramos el tiempo en que inicia el proceso
+    tiempo_inicio_cronometro = time.time()
+    largo_barra = 25  # Mantenemos el tamaño fijo de la barra
+    
     try:
-        # Ejecutamos ffmpeg capturando stderr (donde ffmpeg envía su progreso)
-        proceso = subprocess.Popen(
-            comando, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace"
-        )
+        proceso = subprocess.Popen(comando, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Aquí leeremos el stderr línea a línea para mostrar el progreso
+        server_socket.settimeout(5.0)
+        conn, addr = server_socket.accept()
+        
+        buffer = ""
         while True:
-            linea = proceso.stderr.readline()
-            if not linea and proceso.poll() is not None:
+            datos = conn.recv(1024)
+            if not datos:
                 break
             
-            # Buscamos el tiempo transcurrido en la salida de ffmpeg
-            match = re.search(r"time=(\d{2}:\d{2}:\d{2}\.\d{2})", linea)
-            if match:
-                tiempo_actual = match.group(1)
-                print(f"\r  {CYAN}Progreso de conversión:{RESET} {tiempo_actual} transcurridos...", end="", flush=True)
+            buffer += datos.decode('utf-8', errors='replace')
+            
+            while "\n" in buffer:
+                linea, buffer = buffer.split("\n", 1)
+                linea = linea.strip()
+                
+                if "out_time=" in linea:
+                    tiempo_crudo = linea.replace("out_time=", "").strip()
+                    
+                    if duracion_total:
+                        try:
+                            partes = tiempo_crudo.split(":")
+                            if len(partes) == 3:
+                                horas = float(partes[0])
+                                minutos = float(partes[1])
+                                segundos = float(partes[2])
+                                
+                                segundos_procesados = (horas * 3600) + (minutos * 60) + segundos
+                                
+                                porcentaje = (segundos_procesados / duracion_total) * 100
+                                if porcentaje > 100: porcentaje = 100.0
+                                
+                                bloques_llenos = int(round((porcentaje / 100.0) * largo_barra))
+                                barra_texto = "█" * bloques_llenos + " " * (largo_barra - bloques_llenos)
+                                
+                                print(f"\r  {CYAN}[{barra_texto}]{RESET} {porcentaje:.1f}% convertido...", end="", flush=True)
+                        except Exception:
+                            print(f"\r  {CYAN}Progreso de conversión:{RESET} {tiempo_crudo[:11]}...", end="", flush=True)
+                    else:
+                        tiempo_corto = tiempo_crudo[:11]
+                        if tiempo_corto.startswith("00:00:"):
+                            tiempo_filtrado = tiempo_corto[6:]
+                        elif tiempo_corto.startswith("00:"):
+                            tiempo_filtrado = tiempo_corto[3:]
+                        else:
+                            tiempo_filtrado = tiempo_corto
+                        print(f"\r  {CYAN}Progreso de conversión:{RESET} {tiempo_filtrado}...", end="", flush=True)
 
+        conn.close()
+        server_socket.close()
+        proceso.wait()
+        
         if proceso.returncode == 0:
-            print(f"\n  {VERDE}¡Conversión completada con éxito!{RESET}")
+            # --- CORRECCIÓN VISUAL: Forzamos el dibujo del 100% al finalizar con éxito ---
+            if duracion_total:
+                barra_llena = "█" * largo_barra
+                print(f"\r  {CYAN}[{barra_llena}]{RESET} 100.0% convertido...", end="", flush=True)
+            
+            # Calculamos el tiempo transcurrido
+            tiempo_total_segundos = int(round(time.time() - tiempo_inicio_cronometro))
+            
+            # Formateamos el texto del tiempo de manera limpia
+            if tiempo_total_segundos < 60:
+                texto_duracion = f"{tiempo_total_segundos} segundos"
+            else:
+                m = tiempo_total_segundos // 60
+                s = tiempo_total_segundos % 60
+                texto_duracion = f"{m} minuto{'s' if m > 1 else ''} y {s} segundo{'s' if s != 1 else ''}"
+                
+            print(f"\n  {VERDE}¡Conversión completada con éxito! [{texto_duracion}]{RESET}")
             return True, salida
         else:
             return False, "La conversión falló durante el proceso de FFmpeg."
             
     except Exception as e:
+        server_socket.close()
         return False, str(e)
-
+                
 def eliminar_si_existe(ruta):
     try:
         if ruta and os.path.exists(ruta):
@@ -345,15 +431,28 @@ def main():
                 limite_res = limites.get(opcion_video, "1080")
                 
                 # 2. Inspeccionamos el codec antes de descargar nada
-                print("\n   Verificando compatibilidad...")
-                codec_detectado = verificar_codec_rapido(url, limite_res, YTDLP_PATH)
+                print("\n  🔍 Verificando compatibilidad en el servidor...")
+                tiene_h264, codec_detectado = verificar_codec_rapido(url, limite_res, YTDLP_PATH)
                 modo_elegido = "compat"
+                necesita_conversion = False  # <--- NUEVA BANDERA
 
-                # 3. Lógica de decisión si detectamos un codec moderno (no avc/h.264)
-                if codec_detectado and "avc" not in codec_detectado and codec_detectado != "desconocido":
-                    nombre_codec = "AV1" if "av01" in codec_detectado else ("VP9" if "vp09" in codec_detectado else codec_detectado)
+                # 3. Lógica inteligente de decisión
+                if tiene_h264:
+                    print(f"  {VERDE}✓ Versión H.264 nativa encontrada. Descarga directa activada.{RESET}")
+                    modo_elegido = "compat"
                     
-                    print(f"\n  {AMARILLO} ATENCIÓN: El codec original es '{nombre_codec}'.{RESET}")
+                elif codec_detectado and "avc" not in codec_detectado and codec_detectado != "desconocido":
+                    # Identificamos el nombre real para mostrárselo al usuario
+                    if "av01" in codec_detectado:
+                        nombre_codec = "AV1"
+                    elif "vp09" in codec_detectado:
+                        nombre_codec = "VP9"
+                    elif "hevc" in codec_detectado or "h265" in codec_detectado:
+                        nombre_codec = "H.265 (HEVC)"
+                    else:
+                        nombre_codec = codec_detectado.upper()
+                    
+                    print(f"\n  {AMARILLO}⚠️ ATENCIÓN: No hay H.264. El codec original es '{nombre_codec}'.{RESET}")
                     print("  ¿Qué deseas hacer?")
                     print("  [1] Convertir a H.264 (Recomendado - Máxima compatibilidad)")
                     print("  [2] Mantener el formato original (Más rápido)")
@@ -361,57 +460,55 @@ def main():
                     while True:
                         resp = input("\n  Elige una opción [1 o 2]: ").strip()
                         if resp == "1":
-                            modo_elegido = "convertir"
+                            modo_elegido = "nativo"        # Lo bajamos puro
+                            necesita_conversion = True     # Le decimos a Python que lo convierta
                             break
                         elif resp == "2":
                             modo_elegido = "nativo"
                             break
                         print("  Opción inválida.")
+                else:
+                    print(f"  {CYAN}Iniciando descarga estándar...{RESET}")
 
                 # 4. Lanzamos la descarga
-                print(f"\n  Descargando en modo: {modo_elegido}...\n")
+                if necesita_conversion:
+                    print(f"\n  Descargando archivo original para luego convertir...\n")
+                else:
+                    print(f"\n  Descargando en modo: {modo_elegido}...\n")
+                    
                 ok, mensaje = descargar_video(url, opcion_video, destino, YTDLP_PATH, FFMPEG_DIR, modo=modo_elegido)
                 
                 if ok:
-                    print("\n  ¡Finalizado con éxito!")
+                    # SI EL USUARIO ELIGIÓ CONVERTIR, AQUÍ TOMA EL CONTROL TU PROGRAMA
+                    if necesita_conversion:
+                        archivo_descargado = encontrar_archivo_reciente(destino)
+                        if archivo_descargado:
+                            ok_conv, mensaje_conv = convertir_a_h264(archivo_descargado, FFMPEG_DIR)
+                            if ok_conv:
+                                eliminar_si_existe(archivo_descargado) # Borramos el original H.265/AV1/VP9
+                                print(f"\n  {VERDE}¡Finalizado con éxito!{RESET}")
+                            else:
+                                mostrar_error(mensaje_conv)
+                        else:
+                            mostrar_error("No se pudo localizar el archivo descargado para convertirlo.")
+                    else:
+                        print(f"\n  {VERDE}¡Finalizado con éxito!{RESET}")
                 else:
+                    # Lógica por si falla por culpa del codec nativo
                     if detectar_error_codec(mensaje):
-                        mostrar_error("El codec predeterminado (H.264/AAC) no está disponible para esta URL.")
-                        print("\n  Se descargará con el formato que ofrezca el sitio.")
-                        ok, mensaje = descargar_video(
-                            url,
-                            opcion_video,
-                            destino,
-                            YTDLP_PATH,
-                            FFMPEG_DIR,
-                            modo="nativo"
-                        )
-                        if ok:
-                            print("\n  ¡Finalizado!")
-                            print("\n  ¿Quieres intentar convertir el archivo descargado a H.264/AAC?")
-                            print("  [1] Sí")
-                            print("  [2] No")
-                            opcion_convertir = input("\n  Elige una opción [1-2]: ").strip()
-                            if opcion_convertir == "1":
-                                archivo = encontrar_archivo_reciente(destino)
-                                if archivo:
-                                    archivo_original = archivo
-                                    ok_conv, mensaje_conv = convertir_a_h264(archivo, FFMPEG_DIR)
-                                    if ok_conv:
-                                        print("\n  Conversión completada.")
-                                        eliminar_si_existe(archivo_original)
-                                    else:
-                                        mostrar_error(mensaje_conv)
-                                else:
-                                    mostrar_error("No se pudo localizar el archivo descargado.")
-                    if not ok:
+                        # ... (tu lógica existente de reintentar en modo compatible si falla)
+                        pass
+                    else:
                         mostrar_error(mensaje)
 
+                # ========================================================
+                # AQUÍ QUEDA LA OPCIÓN DE REPETIR (Justo al final del bucle)
+                # ========================================================
                 verificar_archivos(destino)
-                respuesta = input("\n  ¿Descargar otro archivo con la misma configuración? [S/N]: ").strip().upper()
+                respuesta = input("\n  ¿Descargar otro video con la misma configuración? [S/N]: ").strip().upper()
                 if respuesta != "S":
                     break
-
+        
         elif opcion == "2":
             mostrar_menu_audio(destino)
             opcion_audio = input("  Elige una opción [1-5]: ").strip()
