@@ -2,6 +2,8 @@
 
 Un gestor ejecutable, ligero y portable para la descarga de video y audio optimizado para Windows. Diseñado para ofrecer la máxima velocidad de transferencia incluso en redes corporativas o entornos con restricciones de ancho de banda.
 
+Versión actual: **1.2.5** (definida en `version.py`; usar el mismo número para la etiqueta de cada publicación de GitHub).
+
 ---
 
 <img width="494" height="498" alt="image" src="https://github.com/user-attachments/assets/36e49992-898c-434f-b980-19c6f29f41ce" />
@@ -17,6 +19,7 @@ Un gestor ejecutable, ligero y portable para la descarga de video y audio optimi
 * **Optimización Anti-Throttling (Redes de Trabajo):** Incorpora una configuración avanzada de buffers y bloques de transferencia masivos (`--http-chunk-size`). Esto evita de forma automática el "capado" o límite de velocidad clásico (de hasta 50 KB/s) impuesto por firewalls empresariales o antivirus de red.
 * **Entorno Portable Autónomo:** Gestiona, descarga y repara en caliente todos sus componentes binarios (`yt-dlp.exe`, `ffmpeg.exe`, `ffprobe.exe` y `deno.exe`) en su propio directorio raíz, sin ensuciar el registro del sistema operativo.
 * **Actualizador Inteligente Basado en API:** Conexión directa con las APIs globales de GitHub Releases. Garantiza estabilidad absoluta y descargas veloces, mitigando caídas imprevistas de servidores web externos de terceros.
+* **Actualización transaccional:** Los componentes se descargan y validan en una carpeta temporal antes de sustituirse. Se comprueba el SHA-256 cuando la fuente oficial lo publica; si falla el reemplazo, se intenta restaurar la versión anterior. El actualizador no requiere privilegios de administrador.
 * **Interfaz Limpia en Consola:** Soporte estético dinámico que actualiza el título de la terminal nativamente tanto en Windows como en entornos Unix.
 
 ---

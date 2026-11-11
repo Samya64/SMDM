@@ -4,37 +4,34 @@ import re
 import time
 
 
-def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
+def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio, archivo=None):
     """Encuentra el archivo descargado más recientemente tras hora_inicio y reemplaza '_' por espacios."""
     if not os.path.isdir(destino):
-        return
+        return None
 
-    archivo_mas_reciente = None
-    tiempo_mas_reciente = None
-
-    try:
+    ruta_original = archivo if archivo and os.path.isfile(archivo) else None
+    if ruta_original is None:
+        archivo_mas_reciente = None
+        tiempo_mas_reciente = None
         for entrada in os.scandir(destino):
             if not entrada.is_file():
                 continue
-
             nombre_lower = entrada.name.lower()
             if not any(nombre_lower.endswith(ext) for ext in extensiones):
                 continue
-
             stat = entrada.stat()
-            # Margen de 5 segundos para diferencias de reloj
-            if stat.st_mtime >= hora_inicio - 5:
+            if stat.st_mtime >= hora_inicio:
                 if tiempo_mas_reciente is None or stat.st_mtime > tiempo_mas_reciente:
                     tiempo_mas_reciente = stat.st_mtime
                     archivo_mas_reciente = entrada
-    except Exception:
-        pass
+        if archivo_mas_reciente is None:
+            return None
+        ruta_original = archivo_mas_reciente.path
 
-    if archivo_mas_reciente:
-        nombre_original = archivo_mas_reciente.name
+    nombre_original = os.path.basename(ruta_original)
+    if any(nombre_original.lower().endswith(ext) for ext in extensiones):
         nombre_sanitizado = nombre_original.replace('_', ' ')
         if nombre_sanitizado != nombre_original:
-            ruta_original = archivo_mas_reciente.path
             ruta_nueva = os.path.join(destino, nombre_sanitizado)
 
             contador = 1
@@ -43,10 +40,9 @@ def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
                 ruta_nueva = os.path.join(destino, f"{base} ({contador}){ext}")
                 contador += 1
 
-            try:
-                os.rename(ruta_original, ruta_nueva)
-            except Exception:
-                pass
+            os.replace(ruta_original, ruta_nueva)
+            return ruta_nueva
+    return ruta_original
 
 
 def construir_comando_audio(destino, ytdlp_path, ffmpeg_dir, formato="mp3", calidad="192K"):
@@ -62,8 +58,8 @@ def construir_comando_audio(destino, ytdlp_path, ffmpeg_dir, formato="mp3", cali
         "--ffmpeg-location",
         ffmpeg_dir,
         "--no-playlist",
-        "--no-part",
         "--windows-filenames",        # Asegura compatibilidad de caracteres en Windows
+        "--print", "after_move:filepath",
         "--output", plantilla_salida   # Aplica la plantilla de recorte de 100 caracteres
     ]
 
@@ -143,17 +139,22 @@ def descargar_audio(url, destino, ytdlp_path, ffmpeg_dir, formato="mp3", calidad
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             universal_newlines=True
         )
 
         salida = []
+        archivo_final = None
         for linea in proceso.stdout:
             if not linea:
                 continue
             linea = linea.strip()
             if linea:
                 salida.append(linea)
+                if os.path.isfile(linea):
+                    archivo_final = linea
                 mostrar_barra_progreso(linea)
 
         proceso.wait()
@@ -163,11 +164,17 @@ def descargar_audio(url, destino, ytdlp_path, ffmpeg_dir, formato="mp3", calidad
             mensaje = "\n".join(ultimas) if ultimas else "La descarga terminó con un error."
             return False, mensaje
 
-        renombrar_archivos_con_espacios(
-            destino,
-            (".mp3", ".wav", ".ogg", ".m4a", ".aac", ".webm"),
-            hora_inicio
-        )
+        try:
+            archivo_final = renombrar_archivos_con_espacios(
+                destino,
+                (".mp3", ".wav", ".ogg", ".m4a", ".aac", ".webm"),
+                hora_inicio,
+                archivo_final
+            )
+        except OSError as e:
+            print(f"\n  [AVISO] No se pudo normalizar el nombre del archivo: {e}")
+        if archivo_final is None:
+            return False, "yt-dlp terminó sin error, pero no se pudo localizar el archivo final."
         return True, ""
     except Exception as e:
         print("\n")

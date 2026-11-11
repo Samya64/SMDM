@@ -2,7 +2,10 @@ import os
 import subprocess
 import urllib.request
 import zipfile
-import io
+import tempfile
+import shutil
+import hashlib
+import re
 import time
 import json
 import sys
@@ -63,6 +66,15 @@ def archivo_valido(ruta):
     return os.path.isfile(ruta) and os.path.getsize(ruta) > 0
 
 
+def limpiar_directorio_temporal(ruta):
+    try:
+        shutil.rmtree(ruta)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(f"\n  [AVISO] No se pudo limpiar '{ruta}': {e}")
+
+
 def mostrar_progreso(actual, total, tiempo_inicio, prefijo="Descargando"):
     tiempo_transcurrido = time.time() - tiempo_inicio
     velocidad = actual / tiempo_transcurrido if tiempo_transcurrido > 0 else 0
@@ -74,7 +86,8 @@ def mostrar_progreso(actual, total, tiempo_inicio, prefijo="Descargando"):
         
     if total > 0:
         porcentaje = (actual / total) * 100
-        bloques = int(porcentaje // 4)
+        porcentaje = min(porcentaje, 100)
+        bloques = min(25, int(porcentaje // 4))
         barra = "█" * bloques + "-" * (25 - bloques)
         print(f"\r  >> {prefijo}: |{barra}| {porcentaje:.1f}% ({actual / (1024*1024):.1f}/{total / (1024*1024):.1f} MB) ─ {VERDE}{txt_vel}{RESET}", end="", flush=True)
     else:
@@ -91,30 +104,115 @@ def comprobar_bloqueo(ruta_archivo):
     return False
 
 
-def gestionar_backup(ruta, crear=True):
-    ruta_bak = ruta + ".bak"
-    if crear:
-        try:
-            if os.path.exists(ruta_bak): os.remove(ruta_bak)
-            if os.path.exists(ruta): os.rename(ruta, ruta_bak)
-            return True
-        except Exception:
-            return False
-    else:
-        try:
-            if os.path.exists(ruta): os.remove(ruta)
-            if os.path.exists(ruta_bak): os.rename(ruta_bak, ruta)
-        except Exception:
-            pass
+def descargar_a_archivo(url, ruta, etiqueta, sha256_esperado=None):
+    req = urllib.request.Request(url, headers={"User-Agent": "SMDM"})
+    sha256 = hashlib.sha256()
+    with urllib.request.urlopen(req, timeout=30) as response:
+        total_size = int(response.info().get("Content-Length", 0))
+        bytes_descargados = 0
+        tiempo_inicio = time.time()
+        with open(ruta, "wb") as archivo:
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                archivo.write(chunk)
+                sha256.update(chunk)
+                bytes_descargados += len(chunk)
+                mostrar_progreso(bytes_descargados, total_size, tiempo_inicio, etiqueta)
 
-def limpiar_backup(ruta):
-    # Limpia el respaldo si la descarga se completó correctamente.
-    ruta_bak = ruta + ".bak"
-    if os.path.exists(ruta_bak):
-        try:
-            os.remove(ruta_bak)
-        except Exception:
-            pass
+    if not archivo_valido(ruta):
+        raise RuntimeError(f"{etiqueta} está vacío.")
+    if total_size and bytes_descargados != total_size:
+        raise RuntimeError(
+            f"Descarga incompleta de {etiqueta}: {bytes_descargados} de {total_size} bytes."
+        )
+    if sha256_esperado and sha256.hexdigest().lower() != sha256_esperado.lower():
+        raise RuntimeError(f"No coincide el SHA-256 oficial de {etiqueta}.")
+
+
+def obtener_asset_github(api_url, nombre_asset):
+    req = urllib.request.Request(
+        api_url,
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "SMDM"}
+    )
+    with urllib.request.urlopen(req, timeout=15) as response:
+        release = json.loads(response.read().decode("utf-8"))
+
+    assets = [
+        asset for asset in release.get("assets", [])
+        if asset.get("name") == nombre_asset
+    ]
+    if len(assets) != 1 or not assets[0].get("browser_download_url"):
+        raise RuntimeError(f"No se encontró el asset oficial {nombre_asset}.")
+
+    digest = assets[0].get("digest", "")
+    sha256 = digest.partition(":")[2] if digest.startswith("sha256:") else None
+    return assets[0]["browser_download_url"], sha256
+
+
+def obtener_sha256(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "SMDM"})
+    with urllib.request.urlopen(req, timeout=15) as response:
+        contenido = response.read().decode("ascii").strip()
+    hash_publicado = contenido.split()[0] if contenido else ""
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", hash_publicado):
+        raise RuntimeError("La fuente oficial no devolvió un SHA-256 válido.")
+    return hash_publicado
+
+
+def validar_ejecutable(ruta, argumentos, nombre):
+    resultado = subprocess.run(
+        [ruta, *argumentos],
+        capture_output=True,
+        text=True,
+        timeout=20
+    )
+    salida = (resultado.stdout or resultado.stderr).strip()
+    if resultado.returncode != 0 or not salida:
+        raise RuntimeError(f"{nombre} descargado no superó la validación.")
+    return salida
+
+
+def instalar_transaccional(reemplazos):
+    """Reemplaza varios archivos y restaura el estado anterior si una operación falla."""
+    directorio_backup = tempfile.mkdtemp(prefix=".smdm-backup-", dir=BASE_DIR)
+    respaldos = {}
+    instalados = []
+    try:
+        for indice, destino in enumerate(reemplazos):
+            if os.path.exists(destino):
+                respaldo = os.path.join(directorio_backup, str(indice))
+                os.replace(destino, respaldo)
+                respaldos[destino] = respaldo
+            else:
+                respaldos[destino] = None
+
+        for destino, origen in reemplazos.items():
+            os.replace(origen, destino)
+            instalados.append(destino)
+    except Exception as error:
+        errores_rollback = []
+        for destino in instalados:
+            try:
+                os.remove(destino)
+            except OSError as rollback_error:
+                errores_rollback.append(f"No se pudo retirar {destino}: {rollback_error}")
+        for destino, respaldo in respaldos.items():
+            if respaldo and os.path.exists(respaldo):
+                try:
+                    os.replace(respaldo, destino)
+                except OSError as rollback_error:
+                    errores_rollback.append(f"No se pudo restaurar {destino}: {rollback_error}")
+        if errores_rollback:
+            raise RuntimeError(
+                f"Falló la instalación y el rollback. Los respaldos se conservaron en "
+                f"{directorio_backup}. {'; '.join(errores_rollback)}"
+            ) from error
+        limpiar_directorio_temporal(directorio_backup)
+        raise
+    else:
+        limpiar_directorio_temporal(directorio_backup)
 
 # ==========================================
 # SECCIÓN DE COMPROBACIÓN DE VERSIONES
@@ -126,7 +224,10 @@ def comprobar_estado_ytdlp():
     
     v_local = None
     try:
-        res = subprocess.run([YTDLP_PATH, "--version"], capture_output=True, text=True, timeout=3)
+        res = subprocess.run(
+            [YTDLP_PATH, "--version"], capture_output=True, text=True,
+            timeout=5, check=True
+        )
         v_local = res.stdout.strip()
     except Exception:
         pass
@@ -152,7 +253,10 @@ def comprobar_estado_ffmpeg():
         
     v_local_str = None
     try:
-        res = subprocess.run([FFMPEG_PATH, "-version"], capture_output=True, text=True, timeout=3)
+        res = subprocess.run(
+            [FFMPEG_PATH, "-version"], capture_output=True, text=True,
+            timeout=5, check=True
+        )
         lineas = res.stdout.splitlines()
         if lineas: v_local_str = lineas[0]
     except Exception:
@@ -178,7 +282,10 @@ def comprobar_estado_deno():
 
     v_local = None
     try:
-        res = subprocess.run([DENO_PATH, "--version"], capture_output=True, text=True, timeout=3)
+        res = subprocess.run(
+            [DENO_PATH, "--version"], capture_output=True, text=True,
+            timeout=5, check=True
+        )
         lineas = res.stdout.splitlines()
         if lineas:
             partes = lineas[0].split()
@@ -223,35 +330,29 @@ def actualizar_ytdlp():
         print("  [INFO] Omitiendo descarga de yt-dlp.exe (Ya está actualizado).")
         return True
 
-    tiene_backup = gestionar_backup(YTDLP_PATH, crear=True)
-    print("  >> Descargando ejecutable desde GitHub...")
-    url_ytdlp = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+    directorio_temporal = tempfile.mkdtemp(prefix=".smdm-ytdlp-", dir=BASE_DIR)
+    ruta_temporal = os.path.join(directorio_temporal, "yt-dlp.exe")
     try:
-        req = urllib.request.Request(url_ytdlp, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            total_size = int(response.info().get('Content-Length', 0))
-            bytes_descargados = 0
-            tiempo_inicio = time.time()
-            
-            with open(YTDLP_PATH, "wb") as f:
-                while True:
-                    chunk = response.read(1024 * 64)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    bytes_descargados += len(chunk)
-                    mostrar_progreso(bytes_descargados, total_size, tiempo_inicio, "yt-dlp.exe")
-
-            if not archivo_valido(YTDLP_PATH):
-                raise Exception("el archivo descargado está vacío o incompleto")
-
-            limpiar_backup(YTDLP_PATH)
-            print("\n\n  [OK] yt-dlp.exe actualizado con éxito.")
-            return True
+        print("  >> Descargando yt-dlp en un archivo temporal...")
+        url, sha256 = obtener_asset_github(
+            "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest",
+            "yt-dlp.exe"
+        )
+        descargar_a_archivo(
+            url,
+            ruta_temporal,
+            "yt-dlp.exe",
+            sha256
+        )
+        version = validar_ejecutable(ruta_temporal, ["--version"], "yt-dlp")
+        instalar_transaccional({YTDLP_PATH: ruta_temporal})
+        print(f"\n\n  [OK] yt-dlp.exe actualizado ({version}).")
+        return True
     except Exception as e:
         print(f"\n  [ERROR] Falló la descarga: {e}")
-        if tiene_backup: gestionar_backup(YTDLP_PATH, crear=False)
         return False
+    finally:
+        limpiar_directorio_temporal(directorio_temporal)
 
 def actualizar_ffmpeg():
     # Descarga el paquete oficial de FFmpeg y sustituye ambos binarios.
@@ -266,131 +367,93 @@ def actualizar_ffmpeg():
         print("  [INFO] Omitiendo descarga del pack FFmpeg (Ya está actualizado).")
         return True
 
-    backup_ffmpeg = gestionar_backup(FFMPEG_PATH, crear=True)
-    backup_ffprobe = gestionar_backup(FFPROBE_PATH, crear=True)
-
-    print("  >> Descargando paquete oficial (Essentials 103 MB)...")
-    url_ffmpeg = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
-    
+    directorio_temporal = tempfile.mkdtemp(prefix=".smdm-ffmpeg-", dir=BASE_DIR)
+    ruta_zip = os.path.join(directorio_temporal, "ffmpeg.zip")
+    rutas_temporales = {
+        FFMPEG_PATH: os.path.join(directorio_temporal, "ffmpeg.exe"),
+        FFPROBE_PATH: os.path.join(directorio_temporal, "ffprobe.exe")
+    }
     try:
-        req = urllib.request.Request(url_ffmpeg, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as response:
-            total_size = int(response.info().get('Content-Length', 0))
-            bytes_descargados = 0
-            tiempo_inicio = time.time()
-            zip_en_memoria = io.BytesIO()
-            
-            while True:
-                chunk = response.read(1024 * 256)
-                if not chunk: break
-                zip_en_memoria.write(chunk)
-                bytes_descargados += len(chunk)
-                mostrar_progreso(bytes_descargados, total_size, tiempo_inicio, "FFmpeg Pack")
-        
-        print("\n\n  >> Extrayendo binarios en memoria...")
-        zip_en_memoria.seek(0)
-        
-        with zipfile.ZipFile(zip_en_memoria) as archivo_zip:
-            extraidos = 0
-            for ruta_interna in archivo_zip.namelist():
-                ruta_destino_final = None
-                if ruta_interna.endswith("ffmpeg.exe"): ruta_destino_final = FFMPEG_PATH
-                elif ruta_interna.endswith("ffprobe.exe"): ruta_destino_final = FFPROBE_PATH
-                
-                if ruta_destino_final:
-                    nombre_binario = os.path.basename(ruta_interna)
-                    with archivo_zip.open(ruta_interna) as origen, open(ruta_destino_final, "wb") as destino:
-                        destino.write(origen.read())
-                    print(f"  [OK] Reemplazado: {nombre_binario}")
-                    extraidos += 1
-            
-            if extraidos == 2 and archivo_valido(FFMPEG_PATH) and archivo_valido(FFPROBE_PATH):
-                limpiar_backup(FFMPEG_PATH)
-                limpiar_backup(FFPROBE_PATH)
-                print("\n  ¡FFmpeg y FFprobe actualizados correctamente!")
-                return True
-            else:
-                raise Exception("Zip corrupto o incompleto")
-                
+        print("  >> Descargando el paquete oficial de FFmpeg...")
+        url_ffmpeg = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+        sha256 = obtener_sha256(url_ffmpeg + ".sha256")
+        descargar_a_archivo(
+            url_ffmpeg,
+            ruta_zip,
+            "FFmpeg Pack",
+            sha256
+        )
+        print("\n\n  >> Extrayendo y validando binarios...")
+        with zipfile.ZipFile(ruta_zip) as archivo_zip:
+            miembros = {
+                os.path.basename(nombre).lower(): nombre
+                for nombre in archivo_zip.namelist()
+                if os.path.basename(nombre).lower() in ("ffmpeg.exe", "ffprobe.exe")
+            }
+            if set(miembros) != {"ffmpeg.exe", "ffprobe.exe"}:
+                raise RuntimeError("El paquete ZIP no contiene ffmpeg.exe y ffprobe.exe.")
+            for nombre, destino in (
+                ("ffmpeg.exe", rutas_temporales[FFMPEG_PATH]),
+                ("ffprobe.exe", rutas_temporales[FFPROBE_PATH])
+            ):
+                with archivo_zip.open(miembros[nombre]) as origen, open(destino, "wb") as salida:
+                    shutil.copyfileobj(origen, salida)
+
+        version = validar_ejecutable(rutas_temporales[FFMPEG_PATH], ["-version"], "FFmpeg")
+        validar_ejecutable(rutas_temporales[FFPROBE_PATH], ["-version"], "FFprobe")
+        instalar_transaccional(rutas_temporales)
+        print(f"\n  ¡FFmpeg y FFprobe actualizados correctamente! {version.splitlines()[0]}")
+        return True
     except Exception as e:
         print(f"\n  [ERROR] Ocurrió un fallo: {e}")
-        if backup_ffmpeg: gestionar_backup(FFMPEG_PATH, crear=False)
-        if backup_ffprobe: gestionar_backup(FFPROBE_PATH, crear=False)
         return False
+    finally:
+        limpiar_directorio_temporal(directorio_temporal)
 
 def actualizar_deno():
-    # Ejecuta el proceso nativo de actualización de Deno o lo descarga si no está instalado.
     mostrar_encabezado("ACTUALIZAR DENO")
 
     if comprobar_bloqueo(DENO_PATH):
         print("  [ERROR] deno.exe está bloqueado.")
         return False
+    if "Al día" in ESTADOS["deno"]:
+        print("  [INFO] Omitiendo descarga de Deno (Ya está actualizado).")
+        return True
 
-    if not os.path.exists(DENO_PATH):
-        print("  [INFO] deno.exe no está instalado. Descargándolo desde GitHub...")
-        tiene_backup = gestionar_backup(DENO_PATH, crear=True)
-        url_deno = "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip"
-        try:
-            req = urllib.request.Request(url_deno, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=15) as response:
-                total_size = int(response.info().get('Content-Length', 0))
-                bytes_descargados = 0
-                tiempo_inicio = time.time()
-                zip_en_memoria = io.BytesIO()
-                
-                while True:
-                    chunk = response.read(1024 * 64)
-                    if not chunk:
-                        break
-                    zip_en_memoria.write(chunk)
-                    bytes_descargados += len(chunk)
-                    mostrar_progreso(bytes_descargados, total_size, tiempo_inicio, "deno.zip")
-            
-            print("\n\n  >> Extrayendo deno.exe...")
-            zip_en_memoria.seek(0)
-            with zipfile.ZipFile(zip_en_memoria) as archivo_zip:
-                extraido = False
-                for ruta_interna in archivo_zip.namelist():
-                    if ruta_interna.endswith("deno.exe"):
-                        with archivo_zip.open(ruta_interna) as origen, open(DENO_PATH, "wb") as destino:
-                            destino.write(origen.read())
-                        extraido = True
-                        break
-            
-            if extraido and archivo_valido(DENO_PATH):
-                limpiar_backup(DENO_PATH)
-                print("\n  [OK] deno.exe instalado con éxito.")
-                return True
-            else:
-                raise Exception("El archivo extraído está vacío o incompleto.")
-        except Exception as e:
-            print(f"\n  [ERROR] Falló la descarga de Deno: {e}")
-            if tiene_backup:
-                gestionar_backup(DENO_PATH, crear=False)
-            return False
-    else:
-        print("  >> Ejecutando proceso de actualización nativo de Deno...")
-        try:
-            resultado = subprocess.run(
-                [DENO_PATH, "upgrade"],
-                capture_output=True,
-                text=True,
-                timeout=20
-            )
+    directorio_temporal = tempfile.mkdtemp(prefix=".smdm-deno-", dir=BASE_DIR)
+    ruta_zip = os.path.join(directorio_temporal, "deno.zip")
+    ruta_temporal = os.path.join(directorio_temporal, "deno.exe")
+    try:
+        print("  >> Descargando el paquete oficial de Deno...")
+        url, sha256 = obtener_asset_github(
+            "https://api.github.com/repos/denoland/deno/releases/latest",
+            "deno-x86_64-pc-windows-msvc.zip"
+        )
+        descargar_a_archivo(
+            url,
+            ruta_zip,
+            "deno.zip",
+            sha256
+        )
+        with zipfile.ZipFile(ruta_zip) as archivo_zip:
+            miembros = [
+                nombre for nombre in archivo_zip.namelist()
+                if os.path.basename(nombre).lower() == "deno.exe"
+            ]
+            if len(miembros) != 1:
+                raise RuntimeError("El paquete ZIP no contiene un único deno.exe.")
+            with archivo_zip.open(miembros[0]) as origen, open(ruta_temporal, "wb") as destino:
+                shutil.copyfileobj(origen, destino)
 
-            if resultado.stdout:
-                print(resultado.stdout)
-            if resultado.stderr:
-                print(resultado.stderr)
-
-            if resultado.returncode != 0:
-                print(f"  [ERROR] La actualización de Deno terminó con código {resultado.returncode}.")
-                return False
-
-            return True
-        except Exception as e:
-            print(f"  [ERROR] Falló Deno: {e}")
-            return False
+        version = validar_ejecutable(ruta_temporal, ["--version"], "Deno")
+        instalar_transaccional({DENO_PATH: ruta_temporal})
+        print(f"\n  [OK] deno.exe actualizado ({version.splitlines()[0]}).")
+        return True
+    except Exception as e:
+        print(f"\n  [ERROR] Falló la descarga de Deno: {e}")
+        return False
+    finally:
+        limpiar_directorio_temporal(directorio_temporal)
 
 # ==========================================
 # INTERFAZ DE USUARIO PRINCIPAL

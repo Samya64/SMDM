@@ -12,66 +12,72 @@ def verificar_codec_rapido(url, limite_res, ytdlp_path):
     comando_h264 = [
         ytdlp_path,
         "--no-playlist",
-        "--format-sort", f"res:{limite_res}",
-        "-f", "bestvideo[vcodec^=avc]",  # Filtramos solo H.264
+        "-f", f"bestvideo[vcodec^=avc][height<={limite_res}]",
         "--print", "vcodec",
         url
     ]
     try:
-        resultado = subprocess.run(comando_h264, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
+        resultado = subprocess.run(
+            comando_h264, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=True, timeout=45
+        )
         codec = resultado.stdout.strip().lower()
         if codec and "avc" in codec:
             return True, codec  # True = Sí existe H.264
     except subprocess.CalledProcessError:
-        pass  # No existe H.264, seguimos al paso 2
+        pass
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"error: {e}"
 
     # PASO 2: Si no hay H.264, buscar cuál es el mejor codec disponible
     comando_general = [
         ytdlp_path,
         "--no-playlist",
-        "--format-sort", f"res:{limite_res}",
+        "-f", f"bestvideo[height<={limite_res}]/best[height<={limite_res}]",
         "--print", "vcodec",
         url
     ]
     try:
-        resultado = subprocess.run(comando_general, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
+        resultado = subprocess.run(
+            comando_general, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=True, timeout=45
+        )
         codec = resultado.stdout.strip().lower()
         return False, codec  # False = No hay H.264, devolvemos el extraño
     except subprocess.CalledProcessError:
         return False, "desconocido"
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"error: {e}"
 
 
-def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
+def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio, archivo=None):
     """Encuentra el archivo descargado más recientemente tras hora_inicio y reemplaza '_' por espacios."""
     if not os.path.isdir(destino):
-        return
+        return None
 
-    archivo_mas_reciente = None
-    tiempo_mas_reciente = None
-
-    try:
+    ruta_original = archivo if archivo and os.path.isfile(archivo) else None
+    if ruta_original is None:
+        archivo_mas_reciente = None
+        tiempo_mas_reciente = None
         for entrada in os.scandir(destino):
             if not entrada.is_file():
                 continue
-
             nombre_lower = entrada.name.lower()
             if not any(nombre_lower.endswith(ext) for ext in extensiones):
                 continue
-
             stat = entrada.stat()
-            # Margen de 5 segundos para diferencias de reloj
-            if stat.st_mtime >= hora_inicio - 5:
+            if stat.st_mtime >= hora_inicio:
                 if tiempo_mas_reciente is None or stat.st_mtime > tiempo_mas_reciente:
                     tiempo_mas_reciente = stat.st_mtime
                     archivo_mas_reciente = entrada
-    except Exception:
-        pass
+        if archivo_mas_reciente is None:
+            return None
+        ruta_original = archivo_mas_reciente.path
 
-    if archivo_mas_reciente:
-        nombre_original = archivo_mas_reciente.name
+    nombre_original = os.path.basename(ruta_original)
+    if any(nombre_original.lower().endswith(ext) for ext in extensiones):
         nombre_sanitizado = nombre_original.replace('_', ' ')
         if nombre_sanitizado != nombre_original:
-            ruta_original = archivo_mas_reciente.path
             ruta_nueva = os.path.join(destino, nombre_sanitizado)
 
             contador = 1
@@ -79,11 +85,9 @@ def renombrar_archivos_con_espacios(destino, extensiones, hora_inicio):
                 base, ext = os.path.splitext(nombre_sanitizado)
                 ruta_nueva = os.path.join(destino, f"{base} ({contador}){ext}")
                 contador += 1
-
-            try:
-                os.rename(ruta_original, ruta_nueva)
-            except Exception:
-                pass
+            os.replace(ruta_original, ruta_nueva)
+            return ruta_nueva
+    return ruta_original
 
 
 def construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo="compat"):
@@ -94,7 +98,6 @@ def construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo="compa
         "--ffmpeg-location",
         ffmpeg_dir,
         "--no-playlist", 
-        "--no-part", 
         "--windows-filenames", 
         "--no-mtime" 
     ]
@@ -115,31 +118,29 @@ def construir_comando_video(opcion, destino, ytdlp_path, ffmpeg_dir, modo="compa
     plantilla_salida = os.path.join(destino, f"%(title).100s_[{config['etiqueta']}].%(ext)s")
     comando.extend(["--output", plantilla_salida])
 
-    # Ordenar los formatos con un límite máximo de resolución (horizontal o vertical)
-    comando.extend(["--format-sort", f"res:{config['limite']}"])
+    comando.extend(["--print", "after_move:filepath"])
 
     # Formatos limpios y universales
     if modo == "convertir":
         comando.extend([
-            "--format", "bestvideo+bestaudio/best",
+            "--format", f"bestvideo[height<={config['limite']}]+bestaudio/best[height<={config['limite']}]",
             "--merge-output-format", "mp4",
-            # Añadimos --recode-video para forzar la conversión
             "--recode-video", "mp4",
-            # Aquí está el truco: usamos -movflags +faststart para que sea "streamable"
-            # y los argumentos de ffmpeg para asegurar el codec H.264
             "--postprocessor-args", "ffmpeg:-c:v libx264 -c:a aac -movflags +faststart"
         ])
         return comando
 
     if modo == "nativo":
         comando.extend([
-            "--format", "bestvideo+bestaudio/best"
+            "--format", f"bestvideo[height<={config['limite']}]+bestaudio/best[height<={config['limite']}]"
         ])
         return comando
 
     # Modo por defecto (compat): Intentamos buscar H.264/m4a, y si no, caemos al mejor disponible
     comando.extend([
-        "--format", "bestvideo[vcodec^=avc]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+        "--format",
+        f"bestvideo[vcodec^=avc][height<={config['limite']}]+bestaudio[ext=m4a]/"
+        f"bestvideo[height<={config['limite']}]+bestaudio/best[height<={config['limite']}]",
         "--merge-output-format", "mp4",
         "--embed-chapters"
     ])
@@ -201,56 +202,56 @@ def descargar_video(url, opcion, destino, ytdlp_path, ffmpeg_dir, modo="compat")
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             universal_newlines=True
         )
 
         salida = []
-        # Bandera para saber si ya pasamos la fase de descarga
         procesando_conversion = False
-
+        archivo_final = None
         
         for linea in proceso.stdout:
-            if not linea: continue
+            if not linea:
+                continue
             linea = linea.strip()
-            if not linea: continue
-            
+            if not linea:
+                continue
+
             salida.append(linea)
-            
-            # Detectamos si entramos en fase de re-codificación
-            if "re-encoding" in linea or "Converting" in linea:
-                print(f"\n --- Descarga completada. Iniciando conversión a H.264... ---")
-            
-            # Solo mostramos barra si aún no hemos terminado la descarga
-            if "[download]" in linea:
-                mostrar_barra_progreso(linea)
-            
-            # Si detectamos que yt-dlp empieza a convertir/re-codificar
-            if "has already been downloaded" in linea or "Converting video" in linea or "re-encoding" in linea:
+            if os.path.isfile(linea):
+                archivo_final = linea
+                continue
+            if any(indicador in linea.lower() for indicador in (
+                "has already been downloaded", "converting video", "re-encoding"
+            )):
                 if not procesando_conversion:
-                    print(f"\n  --- Descarga completada. Iniciando conversión/re-codificación (puede tardar) ---")
+                    print("\n  --- Descarga completada. Iniciando conversión (puede tardar) ---")
                     procesando_conversion = True
-            
-            # Solo mostramos barra si aún no estamos en fase de post-procesamiento
             if not procesando_conversion:
                 mostrar_barra_progreso(linea)
 
         proceso.wait()
         print("\n")
-        
-        # ... resto de la función (return True/False)
-        
+
         if proceso.returncode != 0:
             ultimas = [linea for linea in salida[-12:] if linea]
             mensaje = "\n".join(ultimas) if ultimas else "La descarga terminó con un error."
-            return False, mensaje
+            return False, mensaje, None
 
-        renombrar_archivos_con_espacios(
-            destino,
-            (".mp4", ".mkv", ".webm", ".avi", ".mov"),
-            hora_inicio
-        )
-        return True, ""
+        try:
+            archivo_final = renombrar_archivos_con_espacios(
+                destino,
+                (".mp4", ".mkv", ".webm", ".avi", ".mov"),
+                hora_inicio,
+                archivo_final
+            )
+        except OSError as e:
+            print(f"\n  [AVISO] No se pudo normalizar el nombre del archivo: {e}")
+        if archivo_final is None:
+            return False, "yt-dlp terminó sin error, pero no se pudo localizar el archivo final.", None
+        return True, "", archivo_final
     except Exception as e:
         print("\n")
-        return False, str(e)
+        return False, str(e), None
